@@ -9,6 +9,7 @@ dev/
 
 *.pdf
 *.md
+!README.md
 *.json
 
 .claude/
