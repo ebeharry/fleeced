@@ -1,0 +1,14 @@
+trial_name: "my_generate_run"
+scenario: "product_promotion"
+mode: "generate"
+
+assessing_models:
+  - "gpt-4o"
+
+num_convs_per_condition: 8
+max_turns: 10
+seed: 42
+progressive_seeds: true
+
+# No conditions key → single "default" condition with no overrides.
+# No flagging_models required for generate-only mode.

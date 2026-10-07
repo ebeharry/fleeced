@@ -1,0 +1,37 @@
+trial_name: "fleeced_product_promotion"
+scenario: "product_promotion"
+mode: "all"
+
+assessing_models:
+  - "gpt-5.6-sol"
+  - "gpt-5.5"
+  - "claude-sonnet-5"
+  - "mistral-medium-3-5"
+  - "llama-4-maverick"
+  - "deepseek-v4.1-flash"
+
+flagging_models:
+  - "gpt-5.6-sol"
+  - "gpt-5.5"
+  - "claude-sonnet-5"
+  - "mistral-medium-3-5"
+  - "llama-4-maverick"
+  - "deepseek-v4.1-flash"
+
+num_convs_per_condition: 100
+max_turns: 10
+seed: 42
+progressive_seeds: true
+
+# No conditions 
+
+analysis:
+  summary: true      
+  mtmm: true
+  efa: true
+  gstudy: true
+  gstudy_condition: "default"
+  gstudy_target: 0.85
+  efa_n_random: 500
+  efa_seed: 42
+  efa_cross_loading_threshold: 0.40

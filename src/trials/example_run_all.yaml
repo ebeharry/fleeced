@@ -1,0 +1,27 @@
+trial_name: "my_run"
+scenario: "product_promotion"
+mode: "all"           # "generate" | "evaluate" | "all"
+
+assessing_models:
+  - "gpt-4o"
+
+flagging_models:
+  - "gpt-4o"
+
+num_convs_per_condition: 8
+max_turns: 10
+seed: 42
+progressive_seeds: true
+
+# No conditions key → single "default" condition; by-condition analysis is skipped.
+
+analysis:
+  summary: true       # standard run_full_analysis (default: true)
+  mtmm: false
+  efa: false
+  gstudy: false
+  # gstudy_condition: "default"   # condition subdirectory to read (default: "baseline")
+  # gstudy_target: 0.85
+  # efa_n_random: 500
+  # efa_seed: 42
+  # efa_cross_loading_threshold: 0.40
