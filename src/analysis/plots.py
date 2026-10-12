@@ -2039,7 +2039,7 @@ def save_type_purity_dot_plot(
         ax.set_yticklabels(taxonomy_labels)
         ax.set_xlim(0, 105)
         ax.set_xticks([0, 25, 50, 75, 100])
-        ax.set_xlabel("Type purity (%)")
+        ax.set_xlabel("Mean type purity (%)")
         ax.xaxis.grid(True, color="#e6e6e3", linewidth=0.6, zorder=0)
         ax.set_axisbelow(True)
         for spine in ax.spines.values():
@@ -2053,6 +2053,6 @@ def save_type_purity_dot_plot(
             frameon=False, handletextpad=0.3, columnspacing=1.2, fontsize=7.5,
         )
         ax.set_title(
-            "Type purity of EFA factors", fontsize=9, fontweight="bold", pad=22
+            "Mean type purity of EFA factors", fontsize=9, fontweight="bold", pad=22
         )
         _save_figure(fig, output_path, apply_tight_layout=False)

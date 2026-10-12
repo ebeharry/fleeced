@@ -308,22 +308,21 @@ def type_purity(loadings: pd.DataFrame, threshold: float) -> float | None:
     Compute the type purity of an EFA solution.
 
     For each factor, the salient loadings (``|lambda| >= threshold``) are grouped by
-    deception type. Purity is the size of the largest group, summed over factors,
-    divided by the number of salient loadings. A cross-loaded variable counts once on
-    each factor where it is salient.
+    deception type, and the factor's purity is the size of the largest group divided
+    by its number of salient loadings. Type purity is the unweighted mean of these
+    per-factor purities over the factors with at least one salient loading. A
+    cross-loaded variable counts once on each factor where it is salient.
 
     :param loadings: Pattern loadings indexed by ``"{judge}::{type}"``, one column per factor.
     :param threshold: Minimum absolute pattern coefficient for a loading to be salient.
     :return: Type purity as a percentage, or None if no loading is salient.
     """
-    largest = 0
-    total = 0
+    factor_purities = []
     for factor in loadings.columns:
         types = [var.split("::", 1)[1] for var in loadings.index[loadings[factor].abs() >= threshold]]
         if types:
-            largest += collections.Counter(types).most_common(1)[0][1]
-            total += len(types)
-    return 100 * largest / total if total else None
+            factor_purities.append(collections.Counter(types).most_common(1)[0][1] / len(types))
+    return 100 * float(np.mean(factor_purities)) if factor_purities else None
 
 
 def max_abs_factor_correlation(factor_correlations: pd.DataFrame) -> float | None:

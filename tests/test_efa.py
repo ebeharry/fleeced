@@ -401,18 +401,20 @@ class TestTypePurity:
             index=["j1::Falsehood", "j2::Falsehood", "j1::Omission", "j2::Omission"],
         )
 
-    def test_largest_type_group_per_factor(self, loadings):
-        # Factor 1 salient: F, F, O (largest group 2); Factor 2 salient: O, O (largest 2).
-        assert type_purity(loadings, 0.40) == pytest.approx(100 * 4 / 5)
+    def test_unweighted_mean_of_factor_purities(self, loadings):
+        # Factor 1 salient: F, F, O (purity 2/3); Factor 2 salient: O, O (purity 1).
+        assert type_purity(loadings, 0.40) == pytest.approx(100 * (2 / 3 + 1) / 2)
 
     def test_cross_loaded_variable_counts_on_each_factor(self):
+        # Factor 1 salient: F, O (purity 1/2); Factor 2 salient: F (purity 1).
         loadings = pd.DataFrame(
             {"Factor 1": [0.6, 0.5], "Factor 2": [0.5, 0.0]},
             index=["j1::Falsehood", "j2::Omission"],
         )
-        assert type_purity(loadings, 0.40) == pytest.approx(100 * 2 / 3)
+        assert type_purity(loadings, 0.40) == pytest.approx(100 * 3 / 4)
 
-    @pytest.mark.parametrize("threshold, expected", [(0.46, 100.0), (0.85, 100.0), (0.40, 80.0)])
+    # At 0.85 Factor 1 has no salient loading and is left out of the mean.
+    @pytest.mark.parametrize("threshold, expected", [(0.46, 100.0), (0.85, 100.0), (0.40, 100 * 5 / 6)])
     def test_threshold_controls_salience(self, loadings, threshold, expected):
         assert type_purity(loadings, threshold) == pytest.approx(expected)
 

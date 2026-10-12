@@ -141,7 +141,7 @@ class TestBuildValidityTable:
         _write_trial(path, store_efa_metrics=False)
         row = build_validity_table([(path, SCENARIO)], {"efa"}, 0.40)[0]
         assert row["max_abs_phi"] == pytest.approx(0.47)
-        assert row["type_purity"] == pytest.approx(100 * 3 / 4)
+        assert row["type_purity"] == pytest.approx(100 * (2 / 3 + 1) / 2)
 
     def test_raises_on_unknown_section(self, trials):
         with pytest.raises(ValueError, match="Unknown sections"):
