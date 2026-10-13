@@ -19,6 +19,7 @@ from src.analysis.efa import (
     _run_parallel_analysis,
     max_abs_factor_correlation,
     run_efa,
+    salient_indicator_summary,
     save_efa_results,
     type_purity,
 )
@@ -426,6 +427,42 @@ class TestTypePurity:
         assert type_purity(loadings, 0.95) is None
 
 
+class TestSalientIndicatorSummary:
+    @pytest.fixture
+    def loadings(self) -> pd.DataFrame:
+        # Factor 1 salient: a, b, c (c cross-loads); Factor 2 salient: c, d.
+        return pd.DataFrame(
+            {"Factor 1": [0.8, 0.5, 0.45, 0.1], "Factor 2": [0.0, 0.1, -0.42, 0.9]},
+            index=["a", "b", "c", "d"],
+        )
+
+    def test_salient_count_per_factor(self, loadings):
+        result = salient_indicator_summary(loadings, 0.40)
+        assert result["salient_per_factor"] == {"Factor 1": 3, "Factor 2": 2}
+        assert result["s_range"] == [2, 3]
+
+    def test_pct_cross_loaded_per_factor(self, loadings):
+        result = salient_indicator_summary(loadings, 0.40)
+        assert result["pct_cross_loaded_per_factor"]["Factor 1"] == pytest.approx(100 / 3, abs=0.01)
+        assert result["pct_cross_loaded_per_factor"]["Factor 2"] == pytest.approx(50.0)
+        assert result["c_range"] == [pytest.approx(100 / 3, abs=0.01), pytest.approx(50.0)]
+
+    def test_no_cross_loading_at_higher_threshold(self, loadings):
+        result = salient_indicator_summary(loadings, 0.46)
+        assert result["salient_per_factor"] == {"Factor 1": 2, "Factor 2": 1}
+        assert result["c_range"] == [0.0, 0.0]
+
+    def test_factor_without_salient_indicator(self, loadings):
+        result = salient_indicator_summary(loadings, 0.85)
+        assert result["salient_per_factor"] == {"Factor 1": 0, "Factor 2": 1}
+        assert result["pct_cross_loaded_per_factor"]["Factor 1"] is None
+        assert result["s_range"] == [0, 1]
+        assert result["c_range"] == [0.0, 0.0]
+
+    def test_c_range_none_when_nothing_salient(self, loadings):
+        assert salient_indicator_summary(loadings, 0.95)["c_range"] is None
+
+
 class TestMaxAbsFactorCorrelation:
     @pytest.mark.parametrize("matrix, expected", [
         ([[1.0, -0.6], [-0.6, 1.0]], 0.6),
@@ -534,7 +571,7 @@ class TestRunEfa:
         results = run_efa(path, out_dir)
         with open(os.path.join(out_dir, "efa_results.json")) as f:
             saved = json.load(f)
-        for key in ("type_purity", "max_abs_factor_correlation"):
+        for key in ("type_purity", "max_abs_factor_correlation", "salient_indicators"):
             assert key in results
             assert saved[key] == results[key]
 

@@ -287,8 +287,8 @@ def _compute_factor_importance(
     :param loadings: Pattern loadings of shape (n_vars, n_factors).
     :param phi: Factor correlation matrix of shape (n_factors, n_factors).
     :param col_names: Variable names corresponding to rows of loadings.
-    :return: Dict with total_variance, factor_importance, factor_importance_pct,
-             total_common_pct, and communalities (keyed by variable name).
+    :return: Dict with total_variance, factor_importance, total_common_pct, and
+             communalities (keyed by variable name).
     """
     total_variance = float(len(col_names))
     structure = loadings @ phi
@@ -297,7 +297,6 @@ def _compute_factor_importance(
     return {
         "total_variance": round(total_variance, 4),
         "factor_importance": [round(float(v), 4) for v in factor_importance],
-        "factor_importance_pct": [round(float(v) / total_variance * 100, 2) for v in factor_importance],
         "total_common_pct": round(float(communalities.sum()) / total_variance * 100, 2),
         "communalities": {name: round(float(h2), 4) for name, h2 in zip(col_names, communalities)},
     }
@@ -323,6 +322,37 @@ def type_purity(loadings: pd.DataFrame, threshold: float) -> float | None:
         if types:
             factor_purities.append(collections.Counter(types).most_common(1)[0][1] / len(types))
     return 100 * float(np.mean(factor_purities)) if factor_purities else None
+
+
+def salient_indicator_summary(loadings: pd.DataFrame, threshold: float) -> dict:
+    """
+    Count the salient indicators of each factor and the share of them that cross-load.
+
+    An indicator is salient on a factor when ``|lambda| >= threshold`` and
+    cross-loaded when it is salient on two or more factors. For each factor, ``s``
+    is its number of salient indicators and ``c`` is the percentage of those
+    indicators that are cross-loaded; ``c`` is None for a factor with no salient
+    indicator.
+
+    :param loadings: Pattern loadings, one row per indicator and one column per factor.
+    :param threshold: Minimum absolute pattern coefficient for a loading to be salient.
+    :return: Dict with per-factor ``s`` and ``c`` and their ``[min, max]`` ranges over
+        factors; ``c_range`` is None if no factor has a salient indicator.
+    """
+    salient = loadings.abs() >= threshold
+    cross_loaded = salient.sum(axis=1) >= 2
+    s = {factor: int(salient[factor].sum()) for factor in loadings.columns}
+    c = {
+        factor: round(100 * float(cross_loaded[salient[factor]].mean()), 2) if s[factor] else None
+        for factor in loadings.columns
+    }
+    defined_c = [v for v in c.values() if v is not None]
+    return {
+        "salient_per_factor": s,
+        "pct_cross_loaded_per_factor": c,
+        "s_range": [min(s.values()), max(s.values())],
+        "c_range": [min(defined_c), max(defined_c)] if defined_c else None,
+    }
 
 
 def max_abs_factor_correlation(factor_correlations: pd.DataFrame) -> float | None:
@@ -363,6 +393,7 @@ def save_efa_results(results: dict, output_dir: str) -> None:
         "factor_correlations": factor_correlations.round(4).to_dict() if factor_correlations is not None else None,
         "max_abs_factor_correlation": results.get("max_abs_factor_correlation"),
         "type_purity": results.get("type_purity"),
+        "salient_indicators": results.get("salient_indicators"),
     }
     json_path = os.path.join(output_dir, "efa_results.json")
     with open(json_path, "w") as f:
@@ -418,7 +449,7 @@ def run_efa(
     :return: Dict with keys: claim_matrix, parallel, loadings_df,
              factor_correlations, simple_structure, factor_importance,
              structure_df, max_abs_factor_correlation, type_purity,
-             n_claims, n_vars, col_names.
+             salient_indicators, n_claims, n_vars, col_names.
     """
     flagging_results = _load_or_merge_flagging_results(flagging_results_path, verbose)
 
@@ -450,6 +481,7 @@ def run_efa(
     factor_correlations = None
     max_abs_phi = None
     purity = None
+    salient_indicators = None
 
     if n_factors > 0:
         corr = _build_efa_correlation_matrix(claim_matrix)
@@ -462,12 +494,17 @@ def run_efa(
         factor_importance = _compute_factor_importance(loadings, phi, col_names)
         max_abs_phi = max_abs_factor_correlation(factor_correlations)
         purity = type_purity(loadings_df, cross_loading_threshold)
+        salient_indicators = salient_indicator_summary(loadings_df, cross_loading_threshold)
         if verbose:
             frac = simple_structure["simple_structure_fraction"]
             print(f"Simple structure fraction: {frac:.3f} ({simple_structure['n_simple']}/{n_vars} variables)")
-            total = factor_importance["total_variance"]
-            for k, (v, pct) in enumerate(zip(factor_importance["factor_importance"], factor_importance["factor_importance_pct"])):
-                print(f"  Factor {k + 1} importance (sum of squared structure coefficients): {v:.2f} / {total:.2f} = {pct:.1f}%")
+            s_min, s_max = salient_indicators["s_range"]
+            print(f"Salient indicators per factor (s): {s_min}-{s_max}")
+            if salient_indicators["c_range"] is not None:
+                c_min, c_max = salient_indicators["c_range"]
+                print(f"Cross-loaded salient indicators per factor (c): {c_min:.1f}-{c_max:.1f}%")
+            for k, v in enumerate(factor_importance["factor_importance"]):
+                print(f"  Factor {k + 1} importance (sum of squared structure coefficients): {v:.2f}")
             print(f"  Total common variance (sum of communalities): {factor_importance['total_common_pct']:.1f}%")
             for name, h2 in factor_importance["communalities"].items():
                 print(f"  {name}: {h2:.3f}")
@@ -485,6 +522,7 @@ def run_efa(
         "structure_df": structure_df,
         "max_abs_factor_correlation": max_abs_phi,
         "type_purity": purity,
+        "salient_indicators": salient_indicators,
         "n_claims": n_claims,
         "n_vars": n_vars,
         "col_names": col_names,
