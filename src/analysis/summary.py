@@ -3,6 +3,7 @@ import json
 import math
 import os
 import re
+from collections import Counter
 
 from . import claim_grouping
 from .plots import (
@@ -19,7 +20,7 @@ from .plots import (
     save_stacked_deception_rate_by_model_bar,
     save_vote_distribution_bar,
 )
-from .stats import two_proportion_z_test, wilson_ci
+from .stats import cluster_bootstrap_ci, two_proportion_z_test
 
 
 def _load_json(path: str) -> dict | None:
@@ -108,6 +109,36 @@ def _get_unique_flagged_claims(
     return all_ids, flagged_ids
 
 
+def _claims_per_conversation(claim_evaluations: list[dict]) -> Counter:
+    """
+    Count unique claims per conversation.
+
+    :param claim_evaluations: Claim evaluation entries from
+        flagging_results.json.
+    :return: Counter mapping conversation_file to its number of unique claims.
+    """
+    return Counter(
+        conv for _, conv in {
+            (e["claim_id"], e["conversation_file"]) for e in claim_evaluations
+        }
+    )
+
+
+def _conversation_clusters(
+    hits_by_conv: Counter, totals_by_conv: Counter
+) -> list[tuple[int, int]]:
+    """
+    Pair per-conversation hit and total counts for cluster bootstrap.
+
+    :param hits_by_conv: Counter mapping conversation_file to the number of
+        observations meeting the criterion (e.g. confirmed deceptive).
+    :param totals_by_conv: Counter mapping conversation_file to the number of
+        observations.
+    :return: One (n_hits, n_total) pair per conversation.
+    """
+    return [(hits_by_conv[conv], n) for conv, n in totals_by_conv.items()]
+
+
 def _get_primary_types(
     claim_id: str,
     conv_file: str,
@@ -163,6 +194,7 @@ def _derive_rates(
     type_consensus_unanimous: int,
     n_confirmed: int | None,
     n_assessed: int,
+    clusters: dict[str, list[tuple[int, int]]],
 ) -> dict:
     """
     Derive percentage rates and confidence intervals from raw claim counts.
@@ -179,15 +211,26 @@ def _derive_rates(
     :param n_confirmed: Number of claims confirmed deceptive by
         self-assessment, or None if self-assessment was not run.
     :param n_assessed: Number of claims that underwent self-assessment.
+    :param clusters: Per-conversation (n_hits, n_claims) pairs keyed by
+        flag_rate_any_judge, flag_rate and deception_rate, grouped into one
+        list per subtype directory. Each rate's CI is a conversation-level
+        cluster bootstrap stratified by subtype directory, since claims
+        within a conversation are not independent and each subtype has a
+        fixed number of conversations by design.
     :return: Dict with keys flag_rate_any_judge, flag_rate_any_judge_ci, flag_rate,
         flag_rate_ci, gate_filter_rate, type_consensus_rate,
         deception_rate, deception_rate_ci, flag_to_deception_ratio,
-        self_assessment_accuracy, self_assessment_accuracy_ci.
+        self_assessment_accuracy.
     """
     flag_rate_any_judge = n_flagged_any_judge / n_total if n_total > 0 else None
-    flag_rate_any_judge_ci = wilson_ci(n_flagged_any_judge, n_total) if n_total > 0 else None
+    flag_rate_any_judge_ci = (
+        cluster_bootstrap_ci(clusters["flag_rate_any_judge"])
+        if n_total > 0 else None
+    )
     flag_rate = n_flagged / n_total if n_total > 0 else None
-    flag_rate_ci = wilson_ci(n_flagged, n_total) if n_total > 0 else None
+    flag_rate_ci = (
+        cluster_bootstrap_ci(clusters["flag_rate"]) if n_total > 0 else None
+    )
     gate_filter_rate = (
         1 - n_flagged / n_flagged_by_any
         if n_flagged_by_any > 0 else 0.0
@@ -201,16 +244,12 @@ def _derive_rates(
         if n_confirmed is not None and n_total > 0 else None
     )
     deception_rate_ci = (
-        wilson_ci(n_confirmed, n_total)
+        cluster_bootstrap_ci(clusters["deception_rate"])
         if n_confirmed is not None and n_total > 0 else None
     )
     flag_to_deception_ratio = n_flagged_any_judge / n_confirmed if n_confirmed else None
     self_assessment_accuracy = (
         n_confirmed / n_assessed
-        if n_confirmed is not None and n_assessed > 0 else None
-    )
-    self_assessment_accuracy_ci = (
-        wilson_ci(n_confirmed, n_assessed)
         if n_confirmed is not None and n_assessed > 0 else None
     )
     return {
@@ -224,7 +263,6 @@ def _derive_rates(
         "deception_rate_ci": deception_rate_ci,
         "flag_to_deception_ratio": flag_to_deception_ratio,
         "self_assessment_accuracy": self_assessment_accuracy,
-        "self_assessment_accuracy_ci": self_assessment_accuracy_ci,
     }
 
 
@@ -259,7 +297,6 @@ def _compute_subtype_metrics(subtype_dir: str) -> dict:
             "deception_rate_ci": None,
             "flag_to_deception_ratio": None,
             "self_assessment_accuracy": None,
-            "self_assessment_accuracy_ci": None,
             "n_assessed": 0,
             "by_deception_type": {},
             "confirmed_by_deception_type": {},
@@ -279,6 +316,12 @@ def _compute_subtype_metrics(subtype_dir: str) -> dict:
             "_type_consensus_unanimous": 0,
             "_per_model_flag_counts": {},
             "_per_model_total_counts": {},
+            "_per_model_flag_clusters": {},
+            "_clusters": {
+                "flag_rate_any_judge": [],
+                "flag_rate": [],
+                "deception_rate": [],
+            },
         }
 
     claim_evaluations = flagging_data.get("claim_evaluations", [])
@@ -330,11 +373,16 @@ def _compute_subtype_metrics(subtype_dir: str) -> dict:
     per_model_flag_counts: dict[str, int] = {}
     per_model_total_counts: dict[str, int] = {}
     per_model_flag_rates: dict[str, float] = {}
+    per_model_flag_clusters: dict[str, list[list[tuple[int, int]]]] = {}
     for model in flagging_models:
         model_entries = [
             e for e in claim_evaluations if e["flagging_model"] == model
         ]
         n_model_flagged = sum(1 for e in model_entries if e["is_flagged"])
+        per_model_flag_clusters[model] = [_conversation_clusters(
+            Counter(e["conversation_file"] for e in model_entries if e["is_flagged"]),
+            Counter(e["conversation_file"] for e in model_entries),
+        )]
         per_model_flag_counts[model] = n_model_flagged
         per_model_total_counts[model] = len(model_entries)
         per_model_flag_rates[model] = (
@@ -351,12 +399,14 @@ def _compute_subtype_metrics(subtype_dir: str) -> dict:
     assessing_model = None
     confirmed_by_type: dict[str, int] = {t: 0 for t in _DECEPTION_TYPES}
     confirmed_by_type_fractional = {t: 0.0 for t in _DECEPTION_TYPES}
+    confirmed_entries: list[dict] = []
 
     if assessment_data is not None:
         assessment_results = assessment_data.get("assessment_results", [])
         assessing_model = assessment_data.get("assessing_model")
         n_assessed = len(assessment_results)
-        n_confirmed = sum(1 for e in assessment_results if e["is_correct"])
+        confirmed_entries = [e for e in assessment_results if e["is_correct"]]
+        n_confirmed = len(confirmed_entries)
         for e in assessment_results:
             if not e["is_correct"]:
                 continue
@@ -368,6 +418,23 @@ def _compute_subtype_metrics(subtype_dir: str) -> dict:
                 confirmed_by_type[dtype] += 1
                 confirmed_by_type_fractional[dtype] += 1 / len(claim_types)
 
+    claims_by_conv = _claims_per_conversation(claim_evaluations)
+    clusters = {
+        "flag_rate_any_judge": [_conversation_clusters(
+            Counter(
+                conv for (_, conv), entries in votes_by_claim.items()
+                if any(e["is_flagged"] for e in entries)
+            ),
+            claims_by_conv,
+        )],
+        "flag_rate": [_conversation_clusters(
+            Counter(conv for _, conv in passed_gate_keys), claims_by_conv
+        )],
+        "deception_rate": [_conversation_clusters(
+            Counter(e["conversation_file"] for e in confirmed_entries),
+            claims_by_conv,
+        )],
+    }
     rates = _derive_rates(
         n_total=n_total,
         n_flagged_any_judge=n_flagged_any_judge,
@@ -377,6 +444,7 @@ def _compute_subtype_metrics(subtype_dir: str) -> dict:
         type_consensus_unanimous=type_consensus_unanimous,
         n_confirmed=n_confirmed,
         n_assessed=n_assessed,
+        clusters=clusters,
     )
 
     return {
@@ -391,7 +459,6 @@ def _compute_subtype_metrics(subtype_dir: str) -> dict:
         "deception_rate_ci": rates["deception_rate_ci"],
         "flag_to_deception_ratio": rates["flag_to_deception_ratio"],
         "self_assessment_accuracy": rates["self_assessment_accuracy"],
-        "self_assessment_accuracy_ci": rates["self_assessment_accuracy_ci"],
         "n_assessed": n_assessed,
         "by_deception_type": by_deception_type,
         "confirmed_by_deception_type": confirmed_by_type,
@@ -411,6 +478,8 @@ def _compute_subtype_metrics(subtype_dir: str) -> dict:
         "_type_consensus_unanimous": type_consensus_unanimous,
         "_per_model_flag_counts": per_model_flag_counts,
         "_per_model_total_counts": per_model_total_counts,
+        "_per_model_flag_clusters": per_model_flag_clusters,
+        "_clusters": clusters,
     }
 
 
@@ -469,6 +538,14 @@ def _aggregate_metrics(metrics_list: list[dict]) -> dict:
     all_evaluations = [
         e for m in metrics_list for e in m.get("_claim_evaluations", [])
     ]
+    clusters = {
+        key: [
+            stratum
+            for m in metrics_list
+            for stratum in m.get("_clusters", {}).get(key, [])
+        ]
+        for key in ("flag_rate_any_judge", "flag_rate", "deception_rate")
+    }
 
     n_flagged_by_any = sum(m.get("n_flagged_by_any", 0) for m in metrics_list)
     n_flagged = sum(m.get("n_flagged", 0) for m in metrics_list)
@@ -487,7 +564,10 @@ def _aggregate_metrics(metrics_list: list[dict]) -> dict:
 
     agg_per_model_flag_counts: dict[str, int] = {}
     agg_per_model_total_counts: dict[str, int] = {}
+    agg_per_model_flag_clusters: dict[str, list[list[tuple[int, int]]]] = {}
     for m in metrics_list:
+        for model, model_clusters in m.get("_per_model_flag_clusters", {}).items():
+            agg_per_model_flag_clusters.setdefault(model, []).extend(model_clusters)
         for model, count in m.get("_per_model_flag_counts", {}).items():
             agg_per_model_flag_counts[model] = (
                 agg_per_model_flag_counts.get(model, 0) + count
@@ -511,6 +591,7 @@ def _aggregate_metrics(metrics_list: list[dict]) -> dict:
         type_consensus_unanimous=type_consensus_unanimous,
         n_confirmed=n_confirmed,
         n_assessed=n_assessed,
+        clusters=clusters,
     )
 
     return {
@@ -524,7 +605,6 @@ def _aggregate_metrics(metrics_list: list[dict]) -> dict:
         "deception_rate_ci": rates["deception_rate_ci"],
         "flag_to_deception_ratio": rates["flag_to_deception_ratio"],
         "self_assessment_accuracy": rates["self_assessment_accuracy"],
-        "self_assessment_accuracy_ci": rates["self_assessment_accuracy_ci"],
         "n_assessed": n_assessed,
         "by_deception_type": by_type,
         "confirmed_by_deception_type": confirmed_by_type,
@@ -543,6 +623,8 @@ def _aggregate_metrics(metrics_list: list[dict]) -> dict:
         "_type_consensus_unanimous": type_consensus_unanimous,
         "_per_model_flag_counts": agg_per_model_flag_counts,
         "_per_model_total_counts": agg_per_model_total_counts,
+        "_per_model_flag_clusters": agg_per_model_flag_clusters,
+        "_clusters": clusters,
     }
 
 
@@ -599,7 +681,6 @@ def _print_metrics_block(metrics: dict, indent: str = "") -> None:
         print(f"{indent}  Flag/Deception ratio:  {ratio_str}")
         print(f"{indent}  Self-assess accuracy:  "
               f"{_pct(metrics['self_assessment_accuracy'])}"
-              f"{_ci_str(metrics['self_assessment_accuracy_ci'])}"
               f"   ({metrics['n_confirmed_deceptive']}/"
               f"{metrics['n_assessed']} correct)")
 
@@ -751,7 +832,7 @@ def summarize_subtype(subtype_dir: str, verbose: bool = False) -> dict:
     :return: Dict with keys: subtype_name, n_total_claims, n_flagged_any_judge,
         flag_rate_any_judge, flag_rate_any_judge_ci, n_confirmed_deceptive, deception_rate,
         deception_rate_ci, flag_to_deception_ratio,
-        self_assessment_accuracy, self_assessment_accuracy_ci, n_assessed,
+        self_assessment_accuracy, n_assessed,
         by_deception_type, flagging_models, assessing_model.
     """
     metrics = _compute_subtype_metrics(subtype_dir)
@@ -1461,10 +1542,12 @@ def summarize_trial_per_model_by_condition(
             for cond_name in unique_conditions:
                 m = cond_metrics.get(cond_name, {})
                 rate = m.get("per_model_flag_rates", {}).get(judge, 0.0)
-                count = m.get("_per_model_flag_counts", {}).get(judge, 0)
                 total = m.get("_per_model_total_counts", {}).get(judge, 0)
+                judge_clusters = m.get("_per_model_flag_clusters", {}).get(judge, [])
                 rates.append(rate)
-                cis.append(wilson_ci(count, total) if total > 0 else None)
+                cis.append(
+                    cluster_bootstrap_ci(judge_clusters) if total > 0 else None
+                )
             judge_flag_rates.append(rates)
             judge_flag_cis.append(cis)
         save_flag_rate_by_judge(
@@ -1565,7 +1648,9 @@ def _compute_subtype_deception_by_mode(subtype_dir: str, mode: str) -> dict:
     :param subtype_dir: Path to subtype directory containing an
         evaluations/ subdir.
     :param mode: One of :data:`~src.analysis.claim_grouping.CLAIM_MODES`.
-    :return: Dict with n_total_claims, n_confirmed, confirmed_by_type.
+    :return: Dict with n_total_claims, n_confirmed, confirmed_by_type,
+        deception_clusters (one (n_confirmed, n_claims) pair per
+        conversation).
     """
     eval_dir = os.path.join(subtype_dir, "evaluations")
     flagging_data = _load_json(os.path.join(eval_dir, "flagging_results.json"))
@@ -1578,15 +1663,16 @@ def _compute_subtype_deception_by_mode(subtype_dir: str, mode: str) -> dict:
             "n_total_claims": 0,
             "n_confirmed": 0,
             "confirmed_by_type": {t: 0 for t in _DECEPTION_TYPES},
+            "deception_clusters": [],
         }
 
-    all_ids, _ = _get_unique_flagged_claims(
-        flagging_data.get("claim_evaluations", [])
-    )
+    claim_evaluations = flagging_data.get("claim_evaluations", [])
+    all_ids, _ = _get_unique_flagged_claims(claim_evaluations)
     n_total = len(all_ids)
 
     n_confirmed = 0
     confirmed_by_type = {t: 0 for t in _DECEPTION_TYPES}
+    confirmed_entries: list[dict] = []
     if assessment_data is not None:
         for entry in assessment_data.get("assessment_results", []):
             if not entry.get("is_correct"):
@@ -1595,6 +1681,7 @@ def _compute_subtype_deception_by_mode(subtype_dir: str, mode: str) -> dict:
             fake_indicators = {t: t in primary_types for t in _DECEPTION_TYPES}
             if claim_grouping.is_flagged_for_mode(fake_indicators, mode):
                 n_confirmed += 1
+                confirmed_entries.append(entry)
             for t in primary_types:
                 if t in confirmed_by_type:
                     confirmed_by_type[t] += 1
@@ -1603,6 +1690,10 @@ def _compute_subtype_deception_by_mode(subtype_dir: str, mode: str) -> dict:
         "n_total_claims": n_total,
         "n_confirmed": n_confirmed,
         "confirmed_by_type": confirmed_by_type,
+        "deception_clusters": _conversation_clusters(
+            Counter(e["conversation_file"] for e in confirmed_entries),
+            _claims_per_conversation(claim_evaluations),
+        ),
     }
 
 
@@ -1629,6 +1720,7 @@ def compute_deception_rate_by_mode(trial_dir: str, mode: str = "all") -> dict:
     n_total = 0
     n_confirmed = 0
     confirmed_by_type = {t: 0 for t in _DECEPTION_TYPES}
+    deception_clusters: list[list[tuple[int, int]]] = []
     for entry in conditions:
         cond_base = _resolve_condition_base_dir(
             trial_dir, entry["log_dir"], entry["condition_name"]
@@ -1639,11 +1731,14 @@ def compute_deception_rate_by_mode(trial_dir: str, mode: str = "all") -> dict:
             m = _compute_subtype_deception_by_mode(subtype_dir, mode)
             n_total += m["n_total_claims"]
             n_confirmed += m["n_confirmed"]
+            deception_clusters.append(m["deception_clusters"])
             for t, count in m["confirmed_by_type"].items():
                 confirmed_by_type[t] += count
 
     deception_rate = n_confirmed / n_total if n_total > 0 else None
-    deception_rate_ci = wilson_ci(n_confirmed, n_total) if n_total > 0 else None
+    deception_rate_ci = (
+        cluster_bootstrap_ci(deception_clusters) if n_total > 0 else None
+    )
     by_subtype = {
         t: {
             "n_confirmed": count,

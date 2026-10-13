@@ -2,15 +2,19 @@ import json
 import os
 import sys
 import tempfile
+from collections import Counter
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.analysis.stats import two_proportion_z_test, wilson_ci
+from src.analysis.stats import cluster_bootstrap_ci, two_proportion_z_test, wilson_ci
 from src.analysis.summary import (
     _aggregate_metrics,
+    _claims_per_conversation,
     _compute_subtype_metrics,
+    _conversation_clusters,
     _get_primary_types,
     _get_unique_flagged_claims,
     compute_deception_rate_by_mode,
@@ -348,6 +352,90 @@ class TestWilsonCI:
     def test_various_inputs(self, n, total):
         lo, hi = wilson_ci(n, total)
         assert lo < n / total < hi
+
+
+class TestClusterBootstrapCI:
+    def test_no_clusters(self):
+        assert cluster_bootstrap_ci([]) == (0.0, 0.0)
+        assert cluster_bootstrap_ci([[]]) == (0.0, 0.0)
+
+    def test_ignores_empty_clusters(self):
+        assert cluster_bootstrap_ci([[(0, 0)]]) == (0.0, 0.0)
+
+    def test_single_cluster_collapses_to_point(self):
+        lo, hi = cluster_bootstrap_ci([[(3, 10)]])
+        assert lo == pytest.approx(0.3)
+        assert hi == pytest.approx(0.3)
+
+    def test_contains_point_estimate(self):
+        clusters = [(1, 4), (0, 5), (2, 3), (0, 6), (3, 5), (1, 2)]
+        lo, hi = cluster_bootstrap_ci([clusters])
+        rate = sum(s for s, _ in clusters) / sum(t for _, t in clusters)
+        assert 0.0 <= lo < rate < hi <= 1.0
+
+    def test_reproducible_with_seed(self):
+        clusters = [(1, 4), (0, 5), (2, 3), (0, 6)]
+        assert cluster_bootstrap_ci([clusters], seed=7) == cluster_bootstrap_ci([clusters], seed=7)
+
+    def test_wider_than_wilson_when_clustered(self):
+        clusters = [(10, 10)] * 3 + [(0, 10)] * 7
+        lo, hi = cluster_bootstrap_ci([clusters])
+        w_lo, w_hi = wilson_ci(30, 100)
+        assert hi - lo > w_hi - w_lo
+
+    def test_stratified_narrower_than_pooled_when_strata_differ(self):
+        rng = np.random.default_rng(1)
+        low = [(int(rng.integers(0, 2)), 4) for _ in range(50)]
+        high = [(int(rng.integers(2, 5)), 4) for _ in range(50)]
+        p_lo, p_hi = cluster_bootstrap_ci([low + high])
+        s_lo, s_hi = cluster_bootstrap_ci([low, high])
+        assert s_hi - s_lo < p_hi - p_lo
+
+    def test_two_strata_contain_point_estimate(self):
+        clusters = [(1, 4), (0, 5), (2, 3), (0, 6), (3, 5), (1, 2)]
+        lo, hi = cluster_bootstrap_ci([clusters, clusters])
+        rate = sum(s for s, _ in clusters) / sum(t for _, t in clusters)
+        assert lo < rate < hi
+
+
+class TestConversationClusters:
+    def test_claims_per_conversation_dedupes_judges(self):
+        evals = [
+            {**_make_claim_eval("a1", "gpt-4o", True), "conversation_file": "a.json"},
+            {**_make_claim_eval("a1", "claude-3", True), "conversation_file": "a.json"},
+            {**_make_claim_eval("a2", "gpt-4o", False), "conversation_file": "a.json"},
+            {**_make_claim_eval("b1", "gpt-4o", False), "conversation_file": "b.json"},
+        ]
+        assert _claims_per_conversation(evals) == {"a.json": 2, "b.json": 1}
+
+    def test_pairs_hits_with_totals(self):
+        totals = Counter({"a.json": 2, "b.json": 1})
+        hits = Counter({"a.json": 1})
+        assert sorted(_conversation_clusters(hits, totals)) == [(0, 1), (1, 2)]
+
+    def test_subtype_metrics_clusters(self, simple_subtype_dir):
+        m = _compute_subtype_metrics(simple_subtype_dir)
+        assert m["_clusters"] == {
+            "flag_rate_any_judge": [[(2, 4)]],
+            "flag_rate": [[(2, 4)]],
+            "deception_rate": [[(1, 4)]],
+        }
+        assert m["_per_model_flag_clusters"] == {"gpt-4o": [[(2, 4)]]}
+        assert m["deception_rate_ci"] == pytest.approx((0.25, 0.25))
+        assert m["flag_rate_ci"] == pytest.approx((0.5, 0.5))
+        assert m["flag_rate_any_judge_ci"] == pytest.approx((0.5, 0.5))
+
+    def test_no_self_assessment_accuracy_ci(self, simple_subtype_dir):
+        m = _compute_subtype_metrics(simple_subtype_dir)
+        assert "self_assessment_accuracy_ci" not in m
+
+    def test_aggregate_keeps_subtypes_as_strata(self, simple_subtype_dir, two_model_subtype_dir):
+        m1 = _compute_subtype_metrics(simple_subtype_dir)
+        m2 = _compute_subtype_metrics(two_model_subtype_dir)
+        agg = _aggregate_metrics([m1, m2])
+        assert agg["_clusters"]["flag_rate_any_judge"] == [[(2, 4)], [(2, 3)]]
+        assert agg["_per_model_flag_clusters"]["gpt-4o"] == [[(2, 4)], [(2, 3)]]
+        assert agg["_per_model_flag_clusters"]["claude-3"] == [[(1, 3)]]
 
 
 class TestTwoProportionZTest:
