@@ -111,3 +111,7 @@ Run `python -m src <subcommand> --help` for all arguments.
 ```bash
 conda activate fleeced_v1 && python -m pytest tests/
 ```
+
+## License
+
+Released under the [MIT License](LICENSE).
